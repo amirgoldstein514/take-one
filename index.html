@@ -37,6 +37,8 @@
   .r-btn-sm{padding:8px 14px; font-size:13px;}
   .r-edit-name{display:flex; gap:8px; margin-top:12px;}
   .r-input{flex:1; border-radius:10px; border:1px solid #3A3743; background:#100F15; color:#F2EFF6; padding:10px 12px; font-size:14px;}
+  .signup-fields{display:flex; flex-direction:column; gap:10px; margin-top:4px;}
+  .r-error{color:#FF8A8D; font-size:13px; margin:10px 0 0;}
 
   .r-steps-list{margin:0 0 22px; padding-left:20px; display:flex; flex-direction:column; gap:10px; font-size:14.5px; line-height:1.5; color:#DAD6E2;}
   .r-steps-list li::marker{color:#E8923D; font-weight:700;}
@@ -96,12 +98,74 @@
   .r-complete p{margin:0 0 6px; color:#DAD6E2; font-size:14.5px;}
   .r-muted{color:#8B869A !important; font-size:13px !important;}
   .r-loading{color:#9791A3; font-size:14px; padding:40px 0; text-align:center;}
+
+  /* Landscape recording layout -- scoped to the recording screen only
+     (body.on-question-step, toggled in goStep()) and to touch devices
+     (pointer:coarse), so a phone rotated sideways gets a full-bleed camera
+     view matching what's actually being recorded, while every other
+     screen (name confirm, instructions, review, complete) stays in its
+     normal portrait card layout, and a mouse-driven desktop browser window
+     that happens to be wide is unaffected. This is a best-effort layout —
+     it hasn't been checked on a real device yet, so treat exact spacing
+     (especially the rec-badge offset below) as a starting point to tune
+     after a live test, not as final. */
+  @media (orientation: landscape) and (pointer: coarse) {
+    body.on-question-step{ padding:0; }
+    body.on-question-step .phone-frame{ max-width:none; gap:0; }
+    body.on-question-step [data-step="question"]{ position:fixed; inset:0; padding:0; }
+    body.on-question-step .r-camera-wrap{
+      position:fixed; inset:0; width:100vw; height:100vh;
+      aspect-ratio:auto; border-radius:0; border:none;
+    }
+    body.on-question-step .r-qheader{
+      position:fixed; left:0; right:0; z-index:5;
+      top:max(12px, env(safe-area-inset-top));
+      padding:0 max(16px, env(safe-area-inset-right)) 0 max(16px, env(safe-area-inset-left));
+    }
+    body.on-question-step .r-progress{ margin-bottom:8px; }
+    body.on-question-step .r-qcount{
+      display:inline-block; background:rgba(15,14,19,0.55); padding:3px 10px; border-radius:999px; margin:0 0 8px;
+    }
+    body.on-question-step .r-question{
+      font-size:17px; margin:0; background:rgba(15,14,19,0.55); padding:8px 12px; border-radius:12px;
+      max-width:min(70vw, 520px);
+    }
+    body.on-question-step .r-rec-badge{
+      top:calc(max(12px, env(safe-area-inset-top)) + 60px);
+      left:max(14px, env(safe-area-inset-left));
+    }
+    body.on-question-step .r-countdown{ z-index:4; }
+    body.on-question-step .r-camera-error{ z-index:7; }
+    body.on-question-step .r-controls,
+    body.on-question-step .r-controls-review{
+      position:fixed; left:0; right:0; z-index:6;
+      bottom:max(18px, env(safe-area-inset-bottom));
+      padding:0 max(20px, env(safe-area-inset-right)) 0 max(20px, env(safe-area-inset-left));
+    }
+  }
 </style>
 </head>
 <body>
 
 <div class="phone-frame" id="app">
   <div class="r-loading" id="loadingMsg">Loading…</div>
+
+  <section class="r-step" data-step="signup" hidden>
+    <div class="r-card">
+      <p class="r-eyebrow" id="signupBrand"></p>
+      <p class="r-name">You've been invited to record a video for</p>
+      <h2 class="r-name-value" id="signupProjectName"></h2>
+      <p class="r-muted" id="signupClosedMsg" hidden style="margin-bottom:14px;">This project isn't accepting new sign-ups right now — please check with the organizer for a personal link.</p>
+      <div id="signupForm">
+        <div class="signup-fields">
+          <input type="text" id="signupNameInput" class="r-input" placeholder="Your full name">
+          <input type="email" id="signupEmailInput" class="r-input" placeholder="Your email address">
+        </div>
+        <p class="r-error" id="signupError" hidden></p>
+        <button class="r-btn r-btn-primary r-btn-full" id="signupSubmitBtn" style="margin-top:14px;">Continue</button>
+      </div>
+    </div>
+  </section>
 
   <section class="r-step" data-step="confirm" hidden>
     <div class="r-card">
@@ -136,9 +200,11 @@
   </section>
 
   <section class="r-step" data-step="question" hidden>
-    <div class="r-progress" id="rProgress"></div>
-    <p class="r-qcount" id="rQCount"></p>
-    <h2 class="r-question" id="rQuestionText"></h2>
+    <div class="r-qheader">
+      <div class="r-progress" id="rProgress"></div>
+      <p class="r-qcount" id="rQCount"></p>
+      <h2 class="r-question" id="rQuestionText"></h2>
+    </div>
 
     <div class="r-camera-wrap">
       <video id="rVideoLive" class="r-camera" autoplay muted playsinline></video>
@@ -207,7 +273,9 @@
   // dashboard uses) ----
   var API_URL = "https://script.google.com/a/macros/creativeimageproductions.com/s/AKfycbyyKaiaC79eUmI90Tk7eXouyRdPcqplevay1UJ7Q-SUMHX-bRlFlmSV9gT-T3oMqsDenA/exec";
 
-  var TOKEN = new URLSearchParams(window.location.search).get("t");
+  var urlParams = new URLSearchParams(window.location.search);
+  var TOKEN = urlParams.get("t");
+  var SIGNUP_PROJECT_ID = urlParams.get("p");
   var data = null;
   var rt = { stream:null, recorder:null, chunks:[], clipUrl:null, lastBlob:null, questionIndex:0,
              timerInterval:null, elapsed:0, countdownInterval:null, ringC:2*Math.PI*52, mode:"linear",
@@ -217,6 +285,10 @@
   function $(id){ return document.getElementById(id); }
   function goStep(step){
     document.querySelectorAll(".r-step").forEach(function(s){ s.hidden = s.getAttribute("data-step")!==step; });
+    // Scopes the landscape full-bleed camera layout (see the stylesheet) to
+    // just the recording screen, so every other screen stays in its normal
+    // portrait card layout regardless of device orientation.
+    document.body.classList.toggle("on-question-step", step==="question");
   }
 
   function callApi(action, payload){
@@ -232,10 +304,12 @@
       });
   }
 
-  if(!TOKEN){
-    $("loadingMsg").textContent = "This link is missing some information. Please check it or ask for a new one.";
-  } else {
+  if(TOKEN){
     callApi("getData", { token: TOKEN }).then(onBoot).catch(onBootError);
+  } else if(SIGNUP_PROJECT_ID){
+    callApi("getSignupInfo", { projectId: SIGNUP_PROJECT_ID }).then(onSignupBoot).catch(onBootError);
+  } else {
+    $("loadingMsg").textContent = "This link is missing some information. Please check it or ask for a new one.";
   }
 
   function onBootError(err){
@@ -254,6 +328,58 @@
     $("instrCount").textContent = data.questions.length;
     goStep("confirm");
   }
+
+  // --- Self sign-up (open link shared e.g. in a WhatsApp group) ----------
+  // A signup link has no personal token yet -- just a project id (?p=...).
+  // Submitting the form calls selfRegister to get a real token, swaps the
+  // URL over to the normal ?t=TOKEN form (so a refresh or bookmark from
+  // here on behaves exactly like a personal invite link), then boots
+  // straight into the same onBoot() flow every other respondent uses.
+  function onSignupBoot(resp){
+    if(!resp || !resp.valid){
+      $("loadingMsg").textContent = "This link isn't valid. Please check it or ask for a new one.";
+      return;
+    }
+    $("loadingMsg").hidden = true;
+    $("signupBrand").textContent = resp.brandName ? (resp.brandName+" asked you to record a quick video") : "You've been asked to record a quick video";
+    $("signupProjectName").textContent = resp.projectName;
+    if(!resp.signupEnabled){
+      $("signupClosedMsg").hidden = false;
+      $("signupForm").hidden = true;
+    }
+    goStep("signup");
+  }
+
+  $("signupSubmitBtn").addEventListener("click",function(){
+    var name = $("signupNameInput").value.trim();
+    var email = $("signupEmailInput").value.trim();
+    $("signupError").hidden = true;
+    if(!name || !email){
+      $("signupError").textContent = "Please enter your name and email.";
+      $("signupError").hidden = false;
+      return;
+    }
+    $("signupSubmitBtn").disabled = true;
+    $("signupSubmitBtn").textContent = "Adding you…";
+    callApi("selfRegister", { projectId: SIGNUP_PROJECT_ID, name: name, email: email })
+      .then(function(resp){
+        TOKEN = resp.token;
+        if(window.history && window.history.replaceState){
+          var url = new URL(window.location.href);
+          url.searchParams.delete("p");
+          url.searchParams.set("t", TOKEN);
+          window.history.replaceState(null, "", url.toString());
+        }
+        return callApi("getData", { token: TOKEN });
+      })
+      .then(onBoot)
+      .catch(function(err){
+        $("signupSubmitBtn").disabled = false;
+        $("signupSubmitBtn").textContent = "Continue";
+        $("signupError").textContent = err.message;
+        $("signupError").hidden = false;
+      });
+  });
 
   $("confirmYesBtn").addEventListener("click",function(){ goStep("instructions"); });
   $("confirmEditBtn").addEventListener("click",function(){
@@ -356,16 +482,58 @@
     ring.style.strokeDashoffset=0;
     overlay.hidden=false;
     num.textContent=seconds;
+    playCountdownTick();
     void ring.offsetWidth;
     ring.style.transition="stroke-dashoffset "+seconds+"s linear";
     ring.style.strokeDashoffset=rt.ringC;
     var remaining=seconds;
     rt.countdownInterval=setInterval(function(){
       remaining--;
-      if(remaining<=0){ clearInterval(rt.countdownInterval); overlay.hidden=true; done(); }
-      else num.textContent=remaining;
+      if(remaining<=0){
+        clearInterval(rt.countdownInterval); overlay.hidden=true;
+        playCountdownGo();
+        done();
+      } else {
+        num.textContent=remaining;
+        playCountdownTick();
+      }
     },1000);
   }
+
+  // --- Countdown beep -----------------------------------------------------
+  // Generated with the Web Audio API rather than an audio file, so
+  // index.html stays a single self-contained file. The context is created
+  // lazily on first use, from inside the "record" button's click handler
+  // (a real user gesture), which is what lets it play immediately on iOS
+  // Safari without a silent first attempt.
+  var audioCtx = null;
+  function getAudioCtx(){
+    if(!audioCtx){
+      var AC = window.AudioContext || window.webkitAudioContext;
+      if(AC){ try{ audioCtx = new AC(); }catch(e){} }
+    }
+    if(audioCtx && audioCtx.state==="suspended") audioCtx.resume().catch(function(){});
+    return audioCtx;
+  }
+  function beep(freq, durationMs, volume){
+    var ctx = getAudioCtx();
+    if(!ctx) return;
+    volume = volume==null ? 0.18 : volume;
+    var osc = ctx.createOscillator(), gain = ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.value = freq;
+    osc.connect(gain); gain.connect(ctx.destination);
+    var now = ctx.currentTime, dur = durationMs/1000;
+    // Quick fade in/out so the tone doesn't click/pop at the edges.
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(volume, now+0.008);
+    gain.gain.setValueAtTime(volume, now+Math.max(dur-0.03,0.01));
+    gain.gain.linearRampToValueAtTime(0, now+dur);
+    osc.start(now);
+    osc.stop(now+dur+0.02);
+  }
+  function playCountdownTick(){ beep(880,90,0.16); }
+  function playCountdownGo(){ beep(1320,220,0.20); }
 
   // Try MP4 (H.264/AAC) first — it's what most editing software wants and,
   // where supported, is usually hardware-encoded (faster, smaller output
