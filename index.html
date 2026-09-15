@@ -71,10 +71,18 @@
   .r-btn-stop::after{content:""; position:absolute; inset:20px; border-radius:5px; background:#D6393E;}
   .r-controls-review{gap:12px;}
   .r-controls-review .r-btn{flex:1;}
-  .r-upload{margin-top:16px; display:flex; align-items:center; gap:10px; font-size:12.5px; color:#9791A3; font-family:"IBM Plex Mono",monospace;}
-  .r-upload-bar{flex:1; height:6px; border-radius:99px; background:#2C2A35; overflow:hidden;}
-  .r-upload-fill{height:100%; width:0%; background:#45C084; transition:width .4s ease;}
-  .r-upload-fill.error{background:#FF6A6D;}
+
+  .r-upload-banner{position:fixed; left:50%; bottom:18px; transform:translateX(-50%); max-width:calc(420px - 32px); width:calc(100% - 32px);
+    background:#1B1922; border:1px solid #3A3743; border-radius:999px; padding:9px 16px; display:flex; align-items:center; gap:9px;
+    font-size:12.5px; color:#DAD6E2; box-shadow:0 10px 30px rgba(0,0,0,0.4); z-index:50;}
+  .r-upload-banner .r-spinner{width:14px; height:14px; flex:none;}
+  .r-upload-spin{animation:rSpin .8s linear infinite; transform-origin:center;}
+  @keyframes rSpin{to{transform:rotate(360deg);}}
+
+  .r-finishing-overlay{position:fixed; inset:0; background:rgba(10,9,13,0.85); display:flex; align-items:center; justify-content:center; padding:20px; z-index:100;}
+  .r-finishing-card{background:#1B1922; border:1px solid #322F3B; border-radius:20px; padding:30px 26px; text-align:center; max-width:340px;}
+  .r-finishing-card .r-spinner{width:34px; height:34px; margin:0 auto 16px;}
+  .r-finishing-card p{margin:0 0 6px; font-size:15px; color:#F2EFF6;}
 
   .r-review-list{display:flex; flex-direction:column; gap:0; margin-bottom:18px;}
   .r-review-row{display:flex; align-items:center; gap:10px; padding:12px 0; border-bottom:1px solid #2C2A35;}
@@ -165,10 +173,6 @@
       <button class="r-btn r-btn-ghost" id="rRetryBtn">Retry</button>
       <button class="r-btn r-btn-primary" id="rApproveBtn">Approve</button>
     </div>
-    <div class="r-upload" id="rUploadRow" hidden>
-      <div class="r-upload-bar"><div class="r-upload-fill" id="rUploadFill"></div></div>
-      <span id="rUploadLabel">Uploading…</span>
-    </div>
   </section>
 
   <section class="r-step" data-step="review" hidden>
@@ -190,6 +194,20 @@
   </section>
 </div>
 
+<div class="r-upload-banner" id="rUploadBanner" hidden>
+  <svg class="r-spinner r-upload-spin" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="#3A3743" stroke-width="3"></circle><path d="M21 12a9 9 0 0 0-9-9" stroke="#E8923D" stroke-width="3" stroke-linecap="round"></path></svg>
+  <span id="rUploadBannerText"></span>
+</div>
+
+<div class="r-finishing-overlay" id="rFinishingOverlay" hidden>
+  <div class="r-finishing-card">
+    <svg class="r-spinner r-upload-spin" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="#3A3743" stroke-width="3"></circle><path d="M21 12a9 9 0 0 0-9-9" stroke="#E8923D" stroke-width="3" stroke-linecap="round"></path></svg>
+    <p>Finishing up — please keep this page open</p>
+    <p class="r-muted" id="rFinishingDetail"></p>
+    <button class="r-btn r-btn-primary r-btn-full r-btn-sm" id="rFinishingRetryBtn" hidden style="margin-top:14px;">Retry</button>
+  </div>
+</div>
+
 <script>
 (function(){
   "use strict";
@@ -201,7 +219,8 @@
   var TOKEN = new URLSearchParams(window.location.search).get("t");
   var data = null;
   var rt = { stream:null, recorder:null, chunks:[], clipUrl:null, lastBlob:null, questionIndex:0,
-             timerInterval:null, elapsed:0, countdownInterval:null, ringC:2*Math.PI*52, mode:"linear" };
+             timerInterval:null, elapsed:0, countdownInterval:null, ringC:2*Math.PI*52, mode:"linear",
+             uploads:{}, finishingPoll:null };
   var CLIP_CAP_SECONDS = 180;
 
   function $(id){ return document.getElementById(id); }
@@ -270,6 +289,8 @@
     data.answers = new Array(data.questions.length).fill(null);
     rt.questionIndex=0;
     rt.mode="linear";
+    rt.uploads={};
+    refreshUploadBanner();
     goStep("question");
     renderQuestionStep();
     startCamera();
@@ -301,8 +322,6 @@
     $("rControlsIdle").hidden=false;
     $("rControlsRecording").hidden=true;
     $("rControlsReview").hidden=true;
-    $("rUploadRow").hidden=true;
-    $("rUploadFill").classList.remove("error");
     pb.hidden=true;
     $("rVideoLive").hidden=false;
     if(rt.clipUrl){ URL.revokeObjectURL(rt.clipUrl); rt.clipUrl=null; }
@@ -317,7 +336,14 @@
     var err=$("rCameraError"), recordBtn=$("rRecordBtn"), live=$("rVideoLive");
     err.hidden=true; recordBtn.disabled=false;
     try{
-      rt.stream = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:"user" }, audio:true });
+      // 1080p30: uploads now go straight to Drive as raw binary (see
+      // startClipUpload below) instead of through the old base64-through-
+      // Apps-Script relay, so there's no need to starve resolution to keep
+      // payloads small anymore.
+      rt.stream = await navigator.mediaDevices.getUserMedia({
+        video:{ facingMode:"user", width:{ ideal:1920, max:1920 }, height:{ ideal:1080, max:1080 }, frameRate:{ ideal:30, max:30 } },
+        audio:true
+      });
       live.srcObject=rt.stream;
     }catch(e){
       $("rCameraErrorMsg").textContent = "We need camera and microphone access to record your answer.";
@@ -350,19 +376,43 @@
     },1000);
   }
 
+  // Try MP4 (H.264/AAC) first — it's what most editing software wants and,
+  // where supported, is usually hardware-encoded (faster, smaller output
+  // than software VP9). Falls back to WebM on browsers that can't record
+  // MP4 via MediaRecorder (e.g. Firefox); isTypeSupported() just returns
+  // false for variants a browser doesn't know, so this is safe everywhere.
   function pickMimeType(){
-    var candidates=["video/webm;codecs=vp9,opus","video/webm;codecs=vp8,opus","video/webm","video/mp4"];
+    var candidates=[
+      "video/mp4;codecs=h264,aac",
+      "video/mp4;codecs=avc1,mp4a",
+      "video/mp4",
+      "video/webm;codecs=vp9,opus",
+      "video/webm;codecs=vp8,opus",
+      "video/webm"
+    ];
     for(var i=0;i<candidates.length;i++){
       if(window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(candidates[i])) return candidates[i];
     }
     return "";
   }
 
+  // ~5.1Mbps total (video+audio) is solid quality for 1080p30 — comparable
+  // to a good 1080p web stream. Uploads no longer route through the base64/
+  // Apps-Script bottleneck (see startClipUpload), so there's headroom to
+  // prioritize quality over squeezing the file down.
+  var VIDEO_BITS_PER_SECOND = 5000000;
+  var AUDIO_BITS_PER_SECOND = 128000;
+
   function beginRecording(){
     rt.chunks=[];
     var mime=pickMimeType();
-    try{ rt.recorder = mime ? new MediaRecorder(rt.stream,{mimeType:mime}) : new MediaRecorder(rt.stream); }
-    catch(e){ rt.recorder = new MediaRecorder(rt.stream); }
+    var opts={ videoBitsPerSecond:VIDEO_BITS_PER_SECOND, audioBitsPerSecond:AUDIO_BITS_PER_SECOND };
+    if(mime) opts.mimeType=mime;
+    try{ rt.recorder = new MediaRecorder(rt.stream, opts); }
+    catch(e){
+      try{ rt.recorder = mime ? new MediaRecorder(rt.stream,{mimeType:mime}) : new MediaRecorder(rt.stream); }
+      catch(e2){ rt.recorder = new MediaRecorder(rt.stream); }
+    }
     rt.recorder.ondataavailable=function(e){ if(e.data && e.data.size) rt.chunks.push(e.data); };
     rt.recorder.onstop=onRecordingStopped;
     rt.recorder.start();
@@ -397,42 +447,107 @@
 
   $("rRetryBtn").addEventListener("click",function(){ showIdleControls(); });
 
+  // --- Background upload -----------------------------------------------
+  // Approving a take no longer blocks here waiting on a slow single-request
+  // upload: the clip starts uploading in the background (straight to Drive,
+  // as raw binary — see startClipUpload) and the respondent moves straight
+  // on to the next question. A small banner shows while anything's still
+  // in flight; Submit itself waits (with a "keep this page open" overlay)
+  // only for whatever hasn't finished yet by the time they hit it.
+
   $("rApproveBtn").addEventListener("click",function(){
     $("rVideoPlayback").pause();
-    $("rControlsReview").hidden=true;
-    var row=$("rUploadRow"), fill=$("rUploadFill"), label=$("rUploadLabel");
-    row.hidden=false; fill.classList.remove("error"); fill.style.width="10%"; label.textContent="Uploading…";
-
-    var reader=new FileReader();
-    reader.onload=function(){
-      var dataUrl=String(reader.result);
-      var markerIdx=dataUrl.indexOf("base64,");
-      if(markerIdx===-1){ onUploadError(new Error("Recorded clip wasn't in the expected format")); return; }
-      var base64=dataUrl.substring(markerIdx+7);
-      fill.style.width="55%";
-      callApi("uploadClip", {
-        token:TOKEN, questionNumber: rt.questionIndex+1,
-        mimeType: rt.lastBlob.type || "video/webm", dataBase64: base64
-      }).then(onUploadSuccess).catch(onUploadError);
-    };
-    reader.onerror=function(){ onUploadError(new Error("Could not read the recorded clip")); };
-    reader.readAsDataURL(rt.lastBlob);
+    data.answers[rt.questionIndex]="done";
+    startClipUpload(rt.questionIndex, rt.lastBlob);
+    afterResolve();
   });
 
-  function onUploadSuccess(){
-    $("rUploadFill").style.width="100%";
-    data.answers[rt.questionIndex]="done";
-    afterResolve();
+  function startClipUpload(qIndex, blob){
+    rt.uploads[qIndex] = { status:"uploading", blob:blob, mimeType: blob.type || "video/webm", attempts:0 };
+    refreshUploadBanner();
+    attemptDirectUpload(qIndex);
   }
-  function onUploadError(err){
-    $("rUploadFill").classList.add("error");
-    $("rUploadFill").style.width="100%";
-    $("rUploadLabel").textContent="Upload failed — try again";
-    setTimeout(function(){
-      $("rUploadRow").hidden=true;
-      $("rControlsReview").hidden=false;
-      var pb=$("rVideoPlayback"); pb.currentTime=0; pb.play().catch(function(){});
-    },1600);
+
+  // Primary path: ask the backend for a one-time Drive resumable-upload URL
+  // (a small, fast request — no video bytes involved), then PUT the raw
+  // clip straight to Google, bypassing Apps Script entirely for the actual
+  // transfer. Retries a few times on transient failures before falling
+  // back to the old base64-through-Apps-Script path as a last resort, in
+  // case something about this network/browser blocks the direct route.
+  function attemptDirectUpload(qIndex){
+    var entry = rt.uploads[qIndex];
+    if(!entry) return;
+    entry.attempts++;
+    callApi("startUpload", { token:TOKEN, questionNumber:qIndex+1, mimeType:entry.mimeType })
+      .then(function(resp){
+        return fetch(resp.uploadUrl, { method:"PUT", headers:{ "Content-Type": entry.mimeType }, body: entry.blob })
+          .then(function(putRes){
+            if(!putRes.ok) throw new Error("Upload failed with status "+putRes.status);
+            return callApi("finalizeUpload", { token:TOKEN, questionNumber:qIndex+1 });
+          });
+      })
+      .then(function(){
+        if(rt.uploads[qIndex]!==entry) return; // superseded by a redo
+        entry.status="done";
+        refreshUploadBanner();
+      })
+      .catch(function(){
+        if(rt.uploads[qIndex]!==entry) return;
+        if(entry.attempts<3){
+          setTimeout(function(){ attemptDirectUpload(qIndex); }, 1500*entry.attempts);
+        } else {
+          attemptFallbackUpload(qIndex);
+        }
+      });
+  }
+
+  function attemptFallbackUpload(qIndex){
+    var entry = rt.uploads[qIndex];
+    if(!entry) return;
+    var reader=new FileReader();
+    reader.onload=function(){
+      if(rt.uploads[qIndex]!==entry) return;
+      var dataUrl=String(reader.result);
+      var markerIdx=dataUrl.indexOf("base64,");
+      if(markerIdx===-1){ markUploadFailed(qIndex); return; }
+      var base64=dataUrl.substring(markerIdx+7);
+      callApi("uploadClip", { token:TOKEN, questionNumber:qIndex+1, mimeType:entry.mimeType, dataBase64:base64 })
+        .then(function(){
+          if(rt.uploads[qIndex]!==entry) return;
+          entry.status="done";
+          refreshUploadBanner();
+        })
+        .catch(function(){ markUploadFailed(qIndex); });
+    };
+    reader.onerror=function(){ markUploadFailed(qIndex); };
+    reader.readAsDataURL(entry.blob);
+  }
+
+  function markUploadFailed(qIndex){
+    var entry=rt.uploads[qIndex];
+    if(!entry) return;
+    entry.status="error";
+    refreshUploadBanner();
+  }
+
+  function pendingUploadCount(){
+    return Object.keys(rt.uploads).filter(function(k){ return rt.uploads[k].status==="uploading"; }).length;
+  }
+  function failedUploadIndexes(){
+    return Object.keys(rt.uploads).filter(function(k){ return rt.uploads[k].status==="error"; }).map(Number);
+  }
+
+  function refreshUploadBanner(){
+    var banner=$("rUploadBanner"), text=$("rUploadBannerText");
+    var pending=pendingUploadCount(), failed=failedUploadIndexes().length;
+    if(pending===0 && failed===0){ banner.hidden=true; }
+    else{
+      banner.hidden=false;
+      text.textContent = failed>0 && pending===0
+        ? (failed===1 ? "1 answer will retry at submit" : failed+" answers will retry at submit")
+        : "Uploading "+pending+" answer"+(pending===1?"":"s")+"…";
+    }
+    if(!$("rFinishingOverlay").hidden) updateFinishingOverlay();
   }
 
   $("rSkipBtn").addEventListener("click",function(){
@@ -477,7 +592,58 @@
     });
   }
 
-  $("rSubmitBtn").addEventListener("click",function(){
+  $("rSubmitBtn").addEventListener("click", waitForUploadsThenSubmit);
+
+  $("rFinishingRetryBtn").addEventListener("click",function(){
+    failedUploadIndexes().forEach(function(qIndex){
+      var entry=rt.uploads[qIndex];
+      entry.status="uploading"; entry.attempts=0;
+      attemptDirectUpload(qIndex);
+    });
+    refreshUploadBanner();
+    updateFinishingOverlay();
+  });
+
+  // Most of the time every clip has already finished uploading in the
+  // background by the time the respondent reaches Submit, so this resolves
+  // immediately. If anything's still in flight (or needs a retry), show the
+  // "keep this page open" overlay and hold Submit until it's all done —
+  // this is the only point where we ever make the respondent wait on an
+  // upload.
+  function waitForUploadsThenSubmit(){
+    if(pendingUploadCount()===0 && failedUploadIndexes().length===0){
+      doSubmit();
+      return;
+    }
+    $("rFinishingOverlay").hidden=false;
+    updateFinishingOverlay();
+    clearInterval(rt.finishingPoll);
+    rt.finishingPoll=setInterval(function(){
+      updateFinishingOverlay();
+      if(pendingUploadCount()===0 && failedUploadIndexes().length===0){
+        clearInterval(rt.finishingPoll);
+        $("rFinishingOverlay").hidden=true;
+        doSubmit();
+      }
+    },500);
+  }
+
+  function updateFinishingOverlay(){
+    var pending=pendingUploadCount(), failed=failedUploadIndexes();
+    var detail=$("rFinishingDetail"), retryBtn=$("rFinishingRetryBtn");
+    if(pending>0){
+      detail.textContent = "Uploading "+pending+" answer"+(pending===1?"":"s")+"…";
+      retryBtn.hidden=true;
+    }else if(failed.length>0){
+      detail.textContent = failed.length===1 ? "1 answer didn't upload." : failed.length+" answers didn't upload.";
+      retryBtn.hidden=false;
+    }else{
+      detail.textContent = "Almost done…";
+      retryBtn.hidden=true;
+    }
+  }
+
+  function doSubmit(){
     $("rSubmitBtn").disabled=true;
     $("rSubmitBtn").textContent="Submitting…";
     callApi("finish", { token:TOKEN }).then(function(){
@@ -495,7 +661,7 @@
       $("rSubmitBtn").textContent="Submit";
       alert("Couldn't submit: "+err.message);
     });
-  });
+  }
 
   function escapeHtml(s){
     return String(s).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];});
