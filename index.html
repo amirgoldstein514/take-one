@@ -188,13 +188,7 @@
     <div class="r-card">
       <p class="r-eyebrow" id="instrBrand"></p>
       <h2 style="font-size:22px;margin-bottom:14px;">How this works</h2>
-      <ol class="r-steps-list">
-        <li>You'll answer <span id="instrCount" class="mono"></span> short questions, one at a time.</li>
-        <li>Tap the record button — you'll get a 4-second countdown before it starts.</li>
-        <li>Say your answer, then tap stop whenever you're done (up to 3 minutes each).</li>
-        <li>Watch it back, then approve it — or retry for another take.</li>
-        <li>Don't want to answer one? You can skip it and move on. At the end you'll see everything and can redo anything before you finish.</li>
-      </ol>
+      <ol class="r-steps-list" id="rInstrList"></ol>
       <button class="r-btn r-btn-primary r-btn-full" id="beginBtn">Begin</button>
     </div>
   </section>
@@ -325,8 +319,24 @@
     $("confirmBrand").textContent = data.brandName + " asked you to record a quick video";
     $("confirmName").textContent = data.name;
     $("instrBrand").textContent = data.brandName;
-    $("instrCount").textContent = data.questions.length;
+    renderInstructions();
     goStep("confirm");
+  }
+
+  // Renders the (per-project, admin-editable) "How this works" steps.
+  // "{{count}}" is substituted here rather than server-side, since this
+  // content is only ever rendered in the browser. escapeHtml is still
+  // applied per step since these strings come from the admin's Sheet and
+  // are inserted via innerHTML (see the stored-XSS fix history in the
+  // requirements doc — every admin-entered string that reaches innerHTML
+  // here goes through escapeHtml first).
+  function renderInstructions(){
+    var count = data.questions.length;
+    var html = (data.instructions || []).map(function(step){
+      var text = String(step).replace(/\{\{\s*count\s*\}\}/g, String(count));
+      return "<li>"+escapeHtml(text)+"</li>";
+    }).join("");
+    $("rInstrList").innerHTML = html;
   }
 
   // --- Self sign-up (open link shared e.g. in a WhatsApp group) ----------
