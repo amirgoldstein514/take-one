@@ -59,7 +59,8 @@
   .r-ring-bg{fill:none; stroke:rgba(255,255,255,0.18); stroke-width:6;}
   .r-ring-fg{fill:none; stroke:#E8923D; stroke-width:6; stroke-linecap:round; transition:stroke-dashoffset 1s linear;}
   .r-countdown-num{position:absolute; font-family:"Big Shoulders Display"; font-size:52px; font-weight:800; color:#fff;}
-  .r-rec-badge{position:absolute; top:14px; left:14px; background:rgba(0,0,0,0.55); border-radius:999px; padding:6px 12px; display:flex; align-items:center; gap:7px; font-family:"IBM Plex Mono",monospace; font-size:13px; color:#fff;}
+  .r-rec-badge{position:absolute; top:14px; right:14px; background:rgba(0,0,0,0.55); border-radius:999px; padding:6px 12px; display:flex; align-items:center; gap:7px; font-family:"IBM Plex Mono",monospace; font-size:13px; color:#fff;}
+  .r-rec-badge.low-time #rRecTime{color:#FF6A6D;}
   .r-rec-dot{width:9px; height:9px; border-radius:50%; background:#FF6A6D; animation:recPulse 1.1s ease-in-out infinite;}
   @keyframes recPulse{0%,100%{opacity:1;}50%{opacity:.35;}}
   .r-camera-error{position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; text-align:center; padding:26px; background:rgba(10,9,13,0.92); font-size:14px; color:#DAD6E2;}
@@ -132,7 +133,7 @@
     }
     body.on-question-step .r-rec-badge{
       top:calc(max(12px, env(safe-area-inset-top)) + 60px);
-      left:max(14px, env(safe-area-inset-left));
+      right:max(14px, env(safe-area-inset-right));
     }
     body.on-question-step .r-countdown{ z-index:4; }
     body.on-question-step .r-camera-error{ z-index:7; }
@@ -274,7 +275,15 @@
   var rt = { stream:null, recorder:null, chunks:[], clipUrl:null, lastBlob:null, questionIndex:0,
              timerInterval:null, elapsed:0, countdownInterval:null, ringC:2*Math.PI*52, mode:"linear",
              uploads:{}, finishingPoll:null, uploadPrefetch:{} };
-  var CLIP_CAP_SECONDS = 180;
+  // Lowered from 180 (3 minutes) -- capping duration is the single biggest
+  // lever on clip size (it multiplies directly against bitrate), and short
+  // answers also mean less exposure to the phone's screen-lock/background
+  // suspend cutting an upload off mid-transfer. See the requirements doc's
+  // "bandwidth reduction" changelog entry (§22) for the full reasoning and
+  // the resulting worst-case file size, and note that DEFAULT_INSTRUCTIONS
+  // in Code.gs had its "up to 3 minutes" wording updated to match -- but
+  // only for new projects (see the comment there).
+  var CLIP_CAP_SECONDS = 30;
 
   function $(id){ return document.getElementById(id); }
   function goStep(step){
@@ -576,11 +585,16 @@
     return "";
   }
 
-  // ~5.1Mbps total (video+audio) is solid quality for 1080p30 — comparable
-  // to a good 1080p web stream. Uploads no longer route through the base64/
-  // Apps-Script bottleneck (see startClipUpload), so there's headroom to
-  // prioritize quality over squeezing the file down.
-  var VIDEO_BITS_PER_SECOND = 5000000;
+  // Lowered from 5,000,000 -- upload time over mobile data turned out to
+  // matter more than the extra quality headroom this was raised to back
+  // when the base64/Apps-Script relay was the main bottleneck. Combined
+  // with the 30-second CLIP_CAP_SECONDS above, worst-case clip size drops
+  // from ~115 MB (180s @ ~5.1Mbps) to ~9.9 MB (30s @ ~2.6Mbps) -- roughly
+  // a 92% reduction. Audio is left at 128kbps: it's a small slice of the
+  // total bitrate budget, so trimming it barely moves file size and risks
+  // noticeably worse voice clarity for little gain. Tune VIDEO_BITS_PER_SECOND
+  // further if 2.5Mbps still looks too soft or uploads still feel slow.
+  var VIDEO_BITS_PER_SECOND = 2500000;
   var AUDIO_BITS_PER_SECOND = 128000;
 
   function beginRecording(){
@@ -603,9 +617,16 @@
     rt.elapsed=0; updateRecTime();
     rt.timerInterval=setInterval(function(){ rt.elapsed++; updateRecTime(); if(rt.elapsed>=CLIP_CAP_SECONDS) stopRecording(); },1000);
   }
+  // Shows time remaining, counting down to 0:00, rather than elapsed time
+  // counting up -- lets the respondent see at a glance how much of their
+  // 30 seconds is left instead of doing the subtraction themselves. Sits
+  // in the upper-right corner of the camera view (see .r-rec-badge) and
+  // turns red for the last 5 seconds as a heads-up that time's almost out.
   function updateRecTime(){
-    var m=Math.floor(rt.elapsed/60), s=rt.elapsed%60;
+    var remaining = Math.max(0, CLIP_CAP_SECONDS - rt.elapsed);
+    var m=Math.floor(remaining/60), s=remaining%60;
     $("rRecTime").textContent=(m<10?"0":"")+m+":"+(s<10?"0":"")+s;
+    $("rRecBadge").classList.toggle("low-time", remaining<=5);
   }
   function stopRecording(){
     if(rt.recorder && rt.recorder.state!=="inactive") rt.recorder.stop();
