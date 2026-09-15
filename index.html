@@ -273,7 +273,7 @@
   var data = null;
   var rt = { stream:null, recorder:null, chunks:[], clipUrl:null, lastBlob:null, questionIndex:0,
              timerInterval:null, elapsed:0, countdownInterval:null, ringC:2*Math.PI*52, mode:"linear",
-             uploads:{}, finishingPoll:null };
+             uploads:{}, finishingPoll:null, uploadPrefetch:{} };
   var CLIP_CAP_SECONDS = 180;
 
   function $(id){ return document.getElementById(id); }
@@ -417,6 +417,7 @@
     rt.questionIndex=0;
     rt.mode="linear";
     rt.uploads={};
+    rt.uploadPrefetch={};
     notifyUploadStateChanged();
     goStep("question");
     renderQuestionStep();
@@ -482,6 +483,11 @@
 
   $("rRecordBtn").addEventListener("click",function(){
     if(!rt.stream) return;
+    // Kick off the Drive upload-session negotiation now, in parallel with
+    // the 4-second countdown, instead of waiting until Approve (see
+    // prefetchUploadSession below) -- by the time there's a clip to upload,
+    // the round-trip to get a session URL is very likely already done.
+    prefetchUploadSession(rt.questionIndex);
     runCountdown(4,beginRecording);
   });
 
@@ -550,6 +556,11 @@
   // than software VP9). Falls back to WebM on browsers that can't record
   // MP4 via MediaRecorder (e.g. Firefox); isTypeSupported() just returns
   // false for variants a browser doesn't know, so this is safe everywhere.
+  //
+  // Deterministic per browser/session (it only depends on
+  // MediaRecorder.isTypeSupported, which doesn't change mid-visit), so
+  // prefetchUploadSession() below can call this to learn the mimeType a
+  // recording will use before that recording has even happened.
   function pickMimeType(){
     var candidates=[
       "video/mp4;codecs=h264,aac",
@@ -623,6 +634,12 @@
   // on to the next question. A small banner shows while anything's still
   // in flight; Submit itself waits (with a "keep this page open" overlay)
   // only for whatever hasn't finished yet by the time they hit it.
+  //
+  // The small server round-trip to reserve a Drive upload session
+  // (startUpload) is also no longer necessarily on the critical path at
+  // all: prefetchUploadSession() kicks it off as soon as the respondent
+  // taps Record, so it usually finishes during the 4-second countdown or
+  // while they're still talking, well before there's a clip to send.
 
   $("rApproveBtn").addEventListener("click",function(){
     $("rVideoPlayback").pause();
@@ -637,19 +654,76 @@
     attemptDirectUpload(qIndex);
   }
 
-  // Primary path: ask the backend for a one-time Drive resumable-upload URL
-  // (a small, fast request — no video bytes involved), then PUT the raw
-  // clip straight to Google, bypassing Apps Script entirely for the actual
-  // transfer. Retries a few times on transient failures before falling
-  // back to the old base64-through-Apps-Script path as a last resort, in
-  // case something about this network/browser blocks the direct route.
+  // Requests a Drive resumable-upload session ahead of time, as soon as the
+  // respondent taps Record, instead of waiting until they tap Approve.
+  // respondentStartUpload only needs the mimeType MediaRecorder is about to
+  // use (known in advance via pickMimeType(), see above) -- no video bytes
+  // are involved, just a small JSON round-trip to reserve a session URL and
+  // a filename. By the time there's an actual clip to send, the session is
+  // very likely already sitting there, so attemptDirectUpload() can PUT
+  // straight away instead of paying for this negotiation after the fact.
+  //
+  // Safe to reuse across repeated Retries of the same question: Drive
+  // doesn't create the file (or consume the reserved filename) until the
+  // first byte is actually PUT to the session URL, which only happens once
+  // a take is Approved -- so a discarded take never touches the prefetched
+  // session, and the guard below just leaves it in place for the next
+  // attempt. attemptDirectUpload() clears it once a take is approved and
+  // about to consume it, so a later "Redo" from the review screen (which
+  // revisits an already-approved question) correctly triggers a fresh
+  // prefetch instead of reusing an already-spent one.
+  function prefetchUploadSession(qIndex){
+    if(rt.uploadPrefetch[qIndex]) return; // already have one in flight or ready for this take
+    var mimeType = pickMimeType() || "video/webm";
+    rt.uploadPrefetch[qIndex] = callApi("startUpload", { token:TOKEN, questionNumber:qIndex+1, mimeType:mimeType })
+      .then(function(resp){ return { uploadUrl:resp.uploadUrl, mimeType:mimeType }; })
+      .catch(function(){
+        // Not fatal -- attemptDirectUpload() just falls back to requesting
+        // its own session the normal way. Clear it so the next Record tap
+        // (e.g. after a Retry) gets to try prefetching again.
+        delete rt.uploadPrefetch[qIndex];
+        return null;
+      });
+  }
+
+  // Primary path: PUT the clip's raw bytes (not base64) straight to Google
+  // Drive, bypassing Apps Script entirely for the transfer itself. Retries
+  // a few times on transient failures before falling back to the old
+  // base64-through-Apps-Script path as a last resort, in case something
+  // about this network/browser blocks the direct route.
+  //
+  // The very first attempt tries to reuse a session that was already
+  // prefetched while the respondent was recording (see
+  // prefetchUploadSession above) -- if one's ready and its mimeType matches
+  // what actually got recorded, its startUpload round-trip is skipped
+  // entirely. A mismatch (rare -- only happens if the MediaRecorder
+  // constructor itself fell back to a different codec than pickMimeType()
+  // predicted) or a failed/missing prefetch just falls through to
+  // requesting a session the normal way, exactly like before this change.
+  // A retry (attempt 2+) always asks for a brand-new session rather than
+  // reusing a possibly partially-sent one -- resuming a single upload from
+  // its last successfully-received byte is a separate, not-yet-built
+  // improvement (see the requirements doc's open items).
   function attemptDirectUpload(qIndex){
     var entry = rt.uploads[qIndex];
     if(!entry) return;
     entry.attempts++;
-    callApi("startUpload", { token:TOKEN, questionNumber:qIndex+1, mimeType:entry.mimeType })
-      .then(function(resp){
-        return fetch(resp.uploadUrl, { method:"PUT", headers:{ "Content-Type": entry.mimeType }, body: entry.blob })
+
+    var prefetched = (entry.attempts===1) ? rt.uploadPrefetch[qIndex] : null;
+    delete rt.uploadPrefetch[qIndex]; // this take is consuming it now (or we're past reusing it) -- a later Redo needs a fresh one
+
+    var sessionPromise = prefetched
+      ? prefetched.then(function(pre){ return (pre && pre.mimeType===entry.mimeType) ? pre : null; })
+      : Promise.resolve(null);
+
+    sessionPromise
+      .then(function(pre){
+        if(pre) return pre;
+        return callApi("startUpload", { token:TOKEN, questionNumber:qIndex+1, mimeType:entry.mimeType })
+          .then(function(resp){ return { uploadUrl:resp.uploadUrl, mimeType:entry.mimeType }; });
+      })
+      .then(function(session){
+        return fetch(session.uploadUrl, { method:"PUT", headers:{ "Content-Type": entry.mimeType }, body: entry.blob })
           .then(function(putRes){
             if(!putRes.ok) throw new Error("Upload failed with status "+putRes.status);
             return callApi("finalizeUpload", { token:TOKEN, questionNumber:qIndex+1 });
